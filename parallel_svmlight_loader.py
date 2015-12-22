@@ -5,6 +5,7 @@ from joblib import Parallel, delayed
 import numpy as np
 import multiprocessing as mp
 import os
+import scipy.sparse as sp
 
 
 _ONE_MB = (1 << 20)
@@ -62,12 +63,16 @@ def _partition_file(fobj, partitions, bufsize=_ONE_MB):
     fobj.seek(0)
 
     newlines = _positions(fobj, "\n", bufsize)
+
+    # reset the fobj
+    fobj.seek(0)
+
     if not newlines:
         partitions = 1
     if partitions > len(newlines):
         partitions = len(newlines)
     if partitions == 1:
-        return [fname]
+        return [fobj]
 
     # TODO: no attempt is made to load balance partitions
     # based on length. it is assumed that each line is relatively
@@ -102,6 +107,13 @@ def _partition_file(fobj, partitions, bufsize=_ONE_MB):
     return _do_partition_file(fobj, startends, bufsize)
 
 
+def _pad_out_csr_matrix(X, n_cols):
+    assert X.shape[1] <= n_cols
+    return sp.csr_matrix(
+            (X.data, X.indices, X.indptr),
+            shape=(X.shape[0], n_cols))
+
+
 def load_svmlight_file(file_path, n_features=None, dtype=None,
                        buffer_mb=40, zero_based="auto", n_jobs=None):
     """
@@ -115,8 +127,14 @@ def load_svmlight_file(file_path, n_features=None, dtype=None,
 
     with open(file_path, 'r') as fp:
         tempfiles = _partition_file(fp, n_jobs, 40 * _ONE_MB)
+        assert len(tempfiles) == n_jobs
 
-    fn = delayed(load_svmlight_file)
+    fn = delayed(_load_svmlight_file)
     pairs = Parallel(n_jobs=n_jobs, verbose=0)(
         fn(tempfile.name, n_features, dtype, buffer_mb, zero_based)
         for tempfile in tempfiles)
+    n_cols = max(X.shape[1] for X, _ in pairs)
+    Xlist = [_pad_out_csr_matrix(X, n_cols) for X, _ in pairs]
+    Ylist = [Y for _, Y in pairs]
+    X, Y = sp.vstack(Xlist), np.vstack(Ylist)
+    return X, Y
